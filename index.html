@@ -482,10 +482,8 @@
     <div class="filters">
       <div class="fld"><label class="flab" for="f-region">Region</label>
         <select id="f-region"><option>All regions</option></select></div>
-      <div class="fld"><label class="flab" for="f-format">Format</label>
-        <select id="f-format"><option>501</option></select></div>
       <div class="fld"><label class="flab" for="f-window">When</label>
-        <select id="f-window"><option>Tonight</option></select></div>
+        <select id="f-window"><option value="all">All dates</option></select></div>
     </div>
     <div class="grid g2" id="all-events"></div>
   </section>
@@ -1104,15 +1102,26 @@ function renderHeroSide(){
     ).join('');
   }
 }
-function renderEvents(region){
+function renderEvents(){
   const el=$('#all-events'); if(!el) return;
   if(!eventsLoaded){ el.innerHTML = stateMsg('Loading tonight’s tournaments…'); return; }
-  const filtered = region && region!=='All regions';
-  const list = filtered ? EVENTS.filter(e=>e.region===region) : EVENTS;
+  const rSel=$('#f-region'), wSel=$('#f-window');
+  const region   = rSel ? rSel.value : 'All regions';
+  const dateVal  = wSel ? wSel.value : 'all';
+  const dateLabel= (wSel && wSel.selectedOptions[0]) ? wSel.selectedOptions[0].text : '';
+  const byRegion = region && region!=='All regions';
+  const byDate   = dateVal && dateVal!=='all';
+  let list = EVENTS;
+  if(byRegion) list = list.filter(e=>e.region===region);
+  if(byDate)   list = list.filter(e=>e.iso===dateVal);
   if(list.length){ el.innerHTML = list.map(evCard).join(''); return; }
-  el.innerHTML = stateMsg(filtered
-    ? `No events in ${region} tonight.`
-    : 'No tournaments scheduled right now — check back soon.');
+  // Honest empty state, worded for whichever filters are active.
+  let msg;
+  if(byRegion && byDate) msg = `No events in ${region} on ${dateLabel}.`;
+  else if(byRegion)      msg = `No events in ${region} right now.`;
+  else if(byDate)        msg = `No events on ${dateLabel}.`;
+  else                   msg = 'No tournaments scheduled right now — check back soon.';
+  el.innerHTML = stateMsg(msg);
 }
 function renderEventDetail(id){
   // DB ids are numbers but the router passes the hash arg as a string, so
@@ -1392,8 +1401,9 @@ $('#burger').addEventListener('click',()=>{
 /* player search + region filter */
 $('#p-search').addEventListener('input',renderPlayers);
 $('#p-region').addEventListener('change',renderPlayers);
-/* events region filter */
-$('#f-region').addEventListener('change',e=>renderEvents(e.target.value));
+/* events filters — region + date both re-render the list */
+$('#f-region').addEventListener('change',renderEvents);
+$('#f-window').addEventListener('change',renderEvents);
 
 /* join form */
 $('#join-form').addEventListener('submit',async e=>{
@@ -1496,6 +1506,32 @@ async function loadRegionsFromEnum(){
     if([...jf.options].some(o=>o.value===cur)) jf.value=cur;
   }
 }
+// Build a local Date from a Y-M-D string. Never `new Date("YYYY-MM-DD")` — a
+// bare date is parsed as UTC midnight and can shift the day across timezones.
+function parseLocalDate(iso){
+  const [y,m,d] = String(iso||'').slice(0,10).split('-').map(Number);
+  return (y && m && d) ? new Date(y, m-1, d) : null;
+}
+
+// Populate the events "When" selector from the dates that actually have
+// tournaments loaded — the distinct tournament_date values in EVENTS, soonest
+// first. No hard-coded or fabricated dates: every option has events behind it,
+// and if nothing loaded the selector is just "All dates". Mirrors how
+// loadRegionsFromEnum() rebuilds the region selector, and preserves the current
+// selection across reloads.
+function fillEventWindows(){
+  const sel=$('#f-window'); if(!sel) return;
+  const cur=sel.value;
+  const dates=[...new Set(EVENTS.map(e=>e.iso).filter(Boolean))].sort();   // ISO strings sort chronologically
+  sel.innerHTML='';
+  sel.add(new Option('All dates','all'));                                  // always first; clears the date filter
+  dates.forEach(iso=>{
+    const dt=parseLocalDate(iso);
+    const label=dt ? dt.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}) : iso;
+    sel.add(new Option(label, iso));                                       // value is the iso for stable matching
+  });
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+}
 async function loadTournamentsFromSupabase(){
  try{
   if(typeof supabase === 'undefined') throw new Error('Supabase SDK unavailable');
@@ -1511,14 +1547,12 @@ const { data, error } = await sb
 if(error) throw error;
 
 EVENTS = (data||[]).map(t => {
-  // tournament_date is a DATE (no time), so format just the day. Parse the
-  // Y-M-D parts directly and build a local date — going via new Date(string)
-  // treats a bare date as UTC midnight and can shift the day across timezones.
-  let date = '';
-  if(t.tournament_date){
-    const [y,m,d] = String(t.tournament_date).slice(0,10).split('-').map(Number);
-    if(y && m && d) date = new Date(y, m-1, d).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
-  }
+  // tournament_date is a DATE (no time). Keep the raw Y-M-D as `iso` for sorting
+  // and filtering, and a friendly `date` for display. parseLocalDate avoids the
+  // UTC-midnight day-shift that `new Date("YYYY-MM-DD")` would cause.
+  const iso = t.tournament_date ? String(t.tournament_date).slice(0,10) : '';
+  const dt  = parseLocalDate(iso);
+  const date = dt ? dt.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '';
 
   return {
     id:      t.id,
@@ -1526,6 +1560,7 @@ EVENTS = (data||[]).map(t => {
     // region is the uk_regions enum; no fabricated default — a row without one
     // renders without a region pill.
     region:  t.region || '',
+    iso,
     date,
     time:    EVENT_KICKOFF,    // every event starts at the same UK time
     checkin: EVENT_CHECKIN,    // check-in closes 10 minutes before kick-off
@@ -1542,6 +1577,7 @@ EVENTS = (data||[]).map(t => {
   EVENTS = [];                          // no stale or placeholder data is kept
  }finally{
   eventsLoaded = true;                  // finished trying — render real events or an honest empty state
+  fillEventWindows();                   // rebuild the When selector from the dates that actually loaded
   renderHome(); renderHeroSide(); renderEvents(); buildTicker();
  }
 }
