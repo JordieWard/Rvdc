@@ -1036,7 +1036,7 @@ let eventsLoaded = false;
 function stateMsg(text){ return `<p style="color:var(--muted);padding:8px 0">${text}</p>`; }
 
 function capPct(e){return Math.round(e.reg/e.cap*100);}
-function eventPlayers(e){return REG.filter(p=>p.region===e.region);}
+function eventPlayers(e){return e.entrants || [];}
 
 function evCard(e){
   return `<article class="card clk ev-card" data-link="event:${e.id}">
@@ -1581,7 +1581,7 @@ const { data, error } = await sb
   .from('tournaments')
   .select(`
     *,
-    tournament_entries(*)
+    tournament_entries(*, players(id, name, region))
   `)
   .eq('status', 'open');
 
@@ -1609,6 +1609,13 @@ EVENTS = (data||[]).map(t => {
     entry:   Number(t.entry_fee   || 6),
     cap:     Number(t.max_players || 32),
     reg:     t.tournament_entries ? t.tournament_entries.length : 0,
+    // The people who've actually paid to enter THIS tournament — a row
+    // without a matched player (shouldn't normally happen; the webhook
+    // creates one) is skipped rather than shown as a nameless entry.
+    entrants: (t.tournament_entries||[])
+      .map(te => te.players)
+      .filter(Boolean)
+      .map(p => ({ id: p.id, name: p.name || 'Player', region: p.region || '' })),
     live:    t.status === 'open',
     fmt:     t.game_format || '501 Double Out'
   };
