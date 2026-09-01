@@ -884,6 +884,16 @@ function withRef(url, userId){
   return url + sep + 'client_reference_id=' + encodeURIComponent(userId);
 }
 
+/* Same idea as withRef, but for the tournament buy-in: one Payment Link is
+   shared by every event, so client_reference_id has to carry BOTH which
+   account is paying AND which tournament they're entering. Packed as
+   "userId:tournamentId" and split apart again in the webhook. */
+function withTournamentRef(url, userId, tournamentId){
+  if(!url || !userId || !tournamentId) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'client_reference_id=' + encodeURIComponent(userId + ':' + tournamentId);
+}
+
 /* ---------------- data ---------------- */
 // REGIONS used to be a hard-coded list backing only the players filter.
 // Players now live in the database, so that filter is filled from the same
@@ -1176,7 +1186,7 @@ function renderEventDetail(id){
           <div class="progress" style="margin-top:16px"><i style="width:${capPct(e)}%"></i></div>
           <div class="cap-line"><span>${e.reg} / ${e.cap} entered</span><span>${e.cap-e.reg} left</span></div>
           ${e.live?`<p class="countdown" style="margin:16px 0 0">● Check-in closes ${e.checkin} tonight</p>`:''}
-          <button class="btn btn-primary" style="width:100%;margin-top:18px" data-tournament="1">Pay £6 buy-in &amp; enter</button>
+          <button class="btn btn-primary" style="width:100%;margin-top:18px" data-tournament="${e.id}">Pay £6 buy-in &amp; enter</button>
           <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px" data-link="membership">Membership required · £12/yr</button>
         </div>
         <div class="panel">
@@ -1375,7 +1385,15 @@ document.addEventListener('click',e=>{
       go('membership');
       return;
     }
-    if(TOURNAMENT_URL){ window.open(TOURNAMENT_URL,'_blank','noopener'); }
+    if(TOURNAMENT_URL){
+      // Stripe's redirect back to us is one fixed URL (Payment Links can't
+      // carry a different address per click), so it can't tell us which
+      // tournament this was for. We save that ourselves, in this browser tab,
+      // right before leaving — sessionStorage survives the trip to Stripe and
+      // back as long as it's the same tab.
+      try{ sessionStorage.setItem('tournza_pending_entry', JSON.stringify({ tournamentId: t.dataset.tournament, ts: Date.now() })); }catch(_){}
+      window.location.href = withTournamentRef(TOURNAMENT_URL, authState.user && authState.user.id, t.dataset.tournament);
+    }
     else { go('membership'); }
     return;
   }
@@ -1651,6 +1669,16 @@ go((location.hash||'#home').slice(1)||'home');
   // Membership is now activated ONLY by the verified Stripe webhook (server side),
   // never by the browser — so there's no client write path to tamper with.
   const sleep = ms => new Promise(r=>setTimeout(r, ms));
+
+  // ---- tournament entry (written by the Stripe webhook, not the browser) ----
+  async function checkTournamentEntry(user, tournamentId){
+    try{
+      const { data, error } = await sb.from('tournament_entries')
+        .select('id').eq('player_id', user.id).eq('tournament_id', tournamentId).maybeSingle();
+      if(error){ console.warn('tournament_entries read failed:', error.message); return false; }
+      return !!data;
+    }catch(e){ console.warn('tournament_entries read failed:', e); return false; }
+  }
   function applyMembership(active){
     authState.membershipActive = !!active;
     const badge = $('#user-menu-membership');
@@ -1667,6 +1695,13 @@ go((location.hash||'#home').slice(1)||'home');
     try{
       const url = new URL(location.href);
       url.searchParams.delete('membership');
+      history.replaceState(null,'', url.pathname + (url.search||'') + (location.hash||''));
+    }catch(_){}
+  }
+  function cleanTournamentParam(){
+    try{
+      const url = new URL(location.href);
+      url.searchParams.delete('tournament');
       history.replaceState(null,'', url.pathname + (url.search||'') + (location.hash||''));
     }catch(_){}
   }
@@ -1695,6 +1730,29 @@ go((location.hash||'#home').slice(1)||'home');
         : 'Payment received — your membership will activate shortly. Refresh in a moment if it doesn’t show.');
       return;
     }
+
+    // Did we just return from Stripe tournament buy-in checkout?
+    if(params.get('tournament')==='success'){
+      cleanTournamentParam();
+      let pending = null;
+      try{ pending = JSON.parse(sessionStorage.getItem('tournza_pending_entry')||'null'); }catch(_){}
+      applyMembership(await loadMembership(user));
+      if(!pending || !pending.tournamentId){
+        notify('Payment received — check the event page shortly for your entry.');
+        return;
+      }
+      notify('Confirming your entry…');
+      // Same webhook, same short wait — it writes the tournament_entries row.
+      let entered = await checkTournamentEntry(user, pending.tournamentId);
+      for(let i=0; i<6 && !entered; i++){ await sleep(1500); entered = await checkTournamentEntry(user, pending.tournamentId); }
+      try{ sessionStorage.removeItem('tournza_pending_entry'); }catch(_){}
+      notify(entered
+        ? 'You’re entered ✓'
+        : 'Payment received — your entry will show shortly. Refresh in a moment if it doesn’t.');
+      go('event:' + pending.tournamentId);
+      return;
+    }
+
     applyMembership(await loadMembership(user));
   }
   function onSignedOut(){
