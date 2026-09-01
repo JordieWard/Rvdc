@@ -1392,7 +1392,9 @@ document.addEventListener('click',e=>{
       // right before leaving — sessionStorage survives the trip to Stripe and
       // back as long as it's the same tab.
       try{ sessionStorage.setItem('tournza_pending_entry', JSON.stringify({ tournamentId: t.dataset.tournament, ts: Date.now() })); }catch(_){}
-      window.location.href = withTournamentRef(TOURNAMENT_URL, authState.user && authState.user.id, t.dataset.tournament);
+      const dest = withTournamentRef(TOURNAMENT_URL, authState.user && authState.user.id, t.dataset.tournament);
+      console.log('[debug] buy-in redirect →', dest, '| user id:', authState.user && authState.user.id, '| tournament id:', t.dataset.tournament); // TEMPORARY — remove once confirmed working
+      window.location.href = dest;
     }
     else { go('membership'); }
     return;
