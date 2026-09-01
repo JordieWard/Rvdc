@@ -885,12 +885,9 @@ function withRef(url, userId){
 }
 
 /* ---------------- data ---------------- */
-// REGIONS is interim: it drives only the players filter, which filters the
-// still-hard-coded PLAYERS list. Once players move to the database, that filter
-// will come from the uk_regions enum too. The events filter and the join form
-// are populated entirely from the live enum (loadRegionsFromEnum) — no local
-// region list backs them.
-const REGIONS = ["North East","North West","Yorkshire and the Humber","East Midlands","West Midlands","East of England","London","South East","South West","Scotland","Wales","Northern Ireland"];
+// REGIONS used to be a hard-coded list backing only the players filter.
+// Players now live in the database, so that filter is filled from the same
+// uk_regions enum as everything else (see loadRegionsFromEnum).
 const FORMAT = "Group round robin → knockout to final";
 
 // Every event starts at the same UK time, and check-in closes 10 minutes
@@ -905,109 +902,107 @@ const EVENT_CHECKIN = (function(hhmm){
 // One tournament per UK region, every evening. 32 players max, £6 buy-in.
 let EVENTS = [];
 
-// Player profiles (static attributes). Their points/wins/events/form/recent
-// are computed automatically from RESULTS below — see buildStandings().
-const PLAYERS = [
-  {id:'jordan-ward', initials:'JW', name:'Jordan Ward', region:'London', registered:true, rating:1820, avg:92.4, checkout:41, e180:38, hi:161, bestLeg:12, ava:''},
-  {id:'m-taylor', initials:'MT', name:'M. Taylor', region:'North West', registered:true, rating:1795, avg:90.1, checkout:38, e180:31, hi:158, bestLeg:13, ava:'g'},
-  {id:'l-singh', initials:'LS', name:'L. Singh', region:'West Midlands', registered:true, rating:1768, avg:88.7, checkout:36, e180:27, hi:144, bestLeg:13, ava:'r'},
-  {id:'d-price', initials:'DP', name:'D. Price', region:'Yorkshire and the Humber', registered:true, rating:1741, avg:86.9, checkout:34, e180:22, hi:140, bestLeg:14, ava:''},
-  {id:'c-moore', initials:'CM', name:'C. Moore', region:'Scotland', registered:true, rating:1712, avg:85.2, checkout:32, e180:19, hi:132, bestLeg:14, ava:'g'},
-  {id:'a-hughes', initials:'AH', name:'A. Hughes', region:'South East', registered:true, rating:1699, avg:84.3, checkout:31, e180:18, hi:138, bestLeg:14, ava:'r'},
-  {id:'r-bell', initials:'RB', name:'R. Bell', region:'East of England', registered:true, rating:1685, avg:83.1, checkout:30, e180:16, hi:130, bestLeg:15, ava:''},
-  {id:'s-okafor', initials:'SO', name:'S. Okafor', region:'London', registered:true, rating:1672, avg:82.0, checkout:29, e180:15, hi:128, bestLeg:15, ava:'g'},
-  {id:'k-obi', initials:'KO', name:'K. Obi', region:'North West', registered:true, rating:1658, avg:80.8, checkout:28, e180:14, hi:124, bestLeg:15, ava:'r'},
-  {id:'j-flynn', initials:'JF', name:'J. Flynn', region:'North East', registered:true, rating:1641, avg:79.6, checkout:27, e180:12, hi:120, bestLeg:16, ava:''},
-  {id:'n-dasgupta', initials:'ND', name:'N. Dasgupta', region:'West Midlands', registered:true, rating:1629, avg:78.9, checkout:26, e180:11, hi:122, bestLeg:15, ava:'g'},
-  {id:'p-reilly', initials:'PR', name:'P. Reilly', region:'Wales', registered:true, rating:1612, avg:77.7, checkout:25, e180:10, hi:118, bestLeg:16, ava:'r'},
-  {id:'h-marsh', initials:'HM', name:'H. Marsh', region:'Yorkshire and the Humber', registered:true, rating:1600, avg:76.8, checkout:24, e180:9, hi:116, bestLeg:16, ava:''},
-  {id:'t-nowak', initials:'TN', name:'T. Nowak', region:'East Midlands', registered:true, rating:1588, avg:75.9, checkout:23, e180:8, hi:114, bestLeg:16, ava:'g'},
-  {id:'g-evans', initials:'GE', name:'G. Evans', region:'Wales', registered:true, rating:1571, avg:74.6, checkout:22, e180:7, hi:110, bestLeg:17, ava:'r'},
-  {id:'b-adeyemi', initials:'BA', name:'B. Adeyemi', region:'Northern Ireland', registered:true, rating:1555, avg:73.4, checkout:21, e180:6, hi:108, bestLeg:17, ava:''},
-  {id:'f-khan', initials:'FK', name:'F. Khan', region:'South West', registered:true, rating:1540, avg:72.1, checkout:20, e180:5, hi:104, bestLeg:17, ava:'g'},
-  {id:'o-murphy', initials:'OM', name:'O. Murphy', region:'Scotland', registered:true, rating:1522, avg:70.8, checkout:19, e180:4, hi:100, bestLeg:18, ava:'r'},
-];
+// Players and results are now loaded from Supabase (see loadPlayersFromSupabase
+// below) instead of being typed into the page. PLAYERS/REG/WINNERS start empty
+// and are filled once the database answers — playersLoaded gates the renderers
+// the same way eventsLoaded gates the events pages, so visitors see an honest
+// "loading" / "no players yet" state instead of anything fabricated.
+let PLAYERS = [];
+let REG = [];
+let WINNERS = [];
+let playersLoaded = false;
 
-/* RESULTS LEDGER — one row per completed event. p = [[playerId, finishingPlace], ...].
-   To log a new result, add a row here; standings, wins, form and profiles all
-   update automatically. Ranking points by finishing place are set in POS_PTS. */
+// Ranking points by finishing place, and the two pure helpers that turn a
+// position into points / a human label. These don't care where the data came
+// from, so they're unchanged from the old in-code version.
 const POS_PTS = {1:25, 2:18, 3:15, 4:12, 5:10, 6:8, 7:6, 8:4};      // 9th+ = 2 pts
-const RESULTS = [
-  {r:'London', t:'London Evening Open', d:'12 Jun', p:[['jordan-ward',1],['s-okafor',3]]},
-  {r:'London', t:'London Evening Open', d:'11 Jun', p:[['jordan-ward',1],['s-okafor',2]]},
-  {r:'London', t:'London Evening Open', d:'10 Jun', p:[['jordan-ward',1],['s-okafor',4]]},
-  {r:'London', t:'London Evening Open', d:'9 Jun',  p:[['jordan-ward',2],['s-okafor',3]]},
-  {r:'London', t:'London Evening Open', d:'8 Jun',  p:[['jordan-ward',1]]},
-  {r:'North West', t:'North West Evening Open', d:'12 Jun', p:[['m-taylor',1],['k-obi',2]]},
-  {r:'North West', t:'North West Evening Open', d:'11 Jun', p:[['m-taylor',1],['k-obi',3]]},
-  {r:'North West', t:'North West Evening Open', d:'10 Jun', p:[['m-taylor',2],['k-obi',5]]},
-  {r:'North West', t:'North West Evening Open', d:'9 Jun',  p:[['m-taylor',1],['k-obi',4]]},
-  {r:'North West', t:'North West Evening Open', d:'8 Jun',  p:[['m-taylor',2]]},
-  {r:'West Midlands', t:'West Midlands Evening Open', d:'12 Jun', p:[['l-singh',1],['n-dasgupta',3]]},
-  {r:'West Midlands', t:'West Midlands Evening Open', d:'11 Jun', p:[['l-singh',2],['n-dasgupta',4]]},
-  {r:'West Midlands', t:'West Midlands Evening Open', d:'10 Jun', p:[['l-singh',1],['n-dasgupta',5]]},
-  {r:'West Midlands', t:'West Midlands Evening Open', d:'9 Jun',  p:[['l-singh',2],['n-dasgupta',4]]},
-  {r:'West Midlands', t:'West Midlands Evening Open', d:'8 Jun',  p:[['l-singh',3]]},
-  {r:'Yorkshire and the Humber', t:'Yorkshire & the Humber Evening Open', d:'12 Jun', p:[['d-price',2],['h-marsh',4]]},
-  {r:'Yorkshire and the Humber', t:'Yorkshire & the Humber Evening Open', d:'11 Jun', p:[['d-price',1],['h-marsh',3]]},
-  {r:'Yorkshire and the Humber', t:'Yorkshire & the Humber Evening Open', d:'10 Jun', p:[['d-price',2],['h-marsh',5]]},
-  {r:'Yorkshire and the Humber', t:'Yorkshire & the Humber Evening Open', d:'9 Jun',  p:[['d-price',3]]},
-  {r:'Yorkshire and the Humber', t:'Yorkshire & the Humber Evening Open', d:'8 Jun',  p:[['d-price',2]]},
-  {r:'Scotland', t:'Scotland Evening Open', d:'12 Jun', p:[['c-moore',2],['o-murphy',5]]},
-  {r:'Scotland', t:'Scotland Evening Open', d:'11 Jun', p:[['c-moore',2],['o-murphy',7]]},
-  {r:'Scotland', t:'Scotland Evening Open', d:'10 Jun', p:[['c-moore',1],['o-murphy',8]]},
-  {r:'Scotland', t:'Scotland Evening Open', d:'9 Jun',  p:[['c-moore',3]]},
-  {r:'Scotland', t:'Scotland Evening Open', d:'8 Jun',  p:[['c-moore',4]]},
-  {r:'South East', t:'South East Evening Open', d:'12 Jun', p:[['a-hughes',1]]},
-  {r:'South East', t:'South East Evening Open', d:'11 Jun', p:[['a-hughes',2]]},
-  {r:'South East', t:'South East Evening Open', d:'10 Jun', p:[['a-hughes',3]]},
-  {r:'South East', t:'South East Evening Open', d:'9 Jun',  p:[['a-hughes',2]]},
-  {r:'East of England', t:'East of England Evening Open', d:'12 Jun', p:[['r-bell',2]]},
-  {r:'East of England', t:'East of England Evening Open', d:'11 Jun', p:[['r-bell',1]]},
-  {r:'East of England', t:'East of England Evening Open', d:'10 Jun', p:[['r-bell',3]]},
-  {r:'East of England', t:'East of England Evening Open', d:'9 Jun',  p:[['r-bell',4]]},
-  {r:'North East', t:'North East Evening Open', d:'12 Jun', p:[['j-flynn',1]]},
-  {r:'North East', t:'North East Evening Open', d:'11 Jun', p:[['j-flynn',3]]},
-  {r:'North East', t:'North East Evening Open', d:'10 Jun', p:[['j-flynn',5]]},
-  {r:'Wales', t:'Wales Evening Open', d:'12 Jun', p:[['p-reilly',2],['g-evans',4]]},
-  {r:'Wales', t:'Wales Evening Open', d:'11 Jun', p:[['p-reilly',4],['g-evans',5]]},
-  {r:'Wales', t:'Wales Evening Open', d:'10 Jun', p:[['p-reilly',5],['g-evans',6]]},
-  {r:'East Midlands', t:'East Midlands Evening Open', d:'12 Jun', p:[['t-nowak',3]]},
-  {r:'East Midlands', t:'East Midlands Evening Open', d:'11 Jun', p:[['t-nowak',5]]},
-  {r:'East Midlands', t:'East Midlands Evening Open', d:'10 Jun', p:[['t-nowak',6]]},
-  {r:'Northern Ireland', t:'Northern Ireland Evening Open', d:'12 Jun', p:[['b-adeyemi',4]]},
-  {r:'Northern Ireland', t:'Northern Ireland Evening Open', d:'11 Jun', p:[['b-adeyemi',6]]},
-  {r:'Northern Ireland', t:'Northern Ireland Evening Open', d:'10 Jun', p:[['b-adeyemi',7]]},
-  {r:'South West', t:'South West Evening Open', d:'12 Jun', p:[['f-khan',5]]},
-  {r:'South West', t:'South West Evening Open', d:'11 Jun', p:[['f-khan',6]]},
-  {r:'South West', t:'South West Evening Open', d:'10 Jun', p:[['f-khan',8]]},
-];
-
 function placePts(n){ return POS_PTS[n] || 2; }
 function finishLabel(n){ return n===1?'Winner':n===2?'Runner-up':n<=4?'Semi-final':n<=8?'Quarter-final':'Group stage'; }
 
-// Build standings + per-player history straight from RESULTS (runs once at load).
-function buildStandings(){
-  const byId = Object.fromEntries(PLAYERS.map(p=>[p.id,p]));
-  PLAYERS.forEach(p=>{ p.points=0; p.wins=0; p.events=0; p.recent=[]; p.form=[]; });
-  RESULTS.forEach(ev=>ev.p.forEach(([id,pos])=>{
-    const p=byId[id]; if(!p) return;
-    p.points+=placePts(pos); p.events++; if(pos===1) p.wins++;
-    p.recent.push({title:ev.t, date:ev.d, pos, pts:placePts(pos)});
-  }));
-  PLAYERS.forEach(p=>{ p.form = p.recent.slice(0,8).map(r=>r.pos<=2?'W':'L'); });
+// Load real players + real results from Supabase and rebuild standings from
+// them — the direct database-backed replacement for the old hard-coded
+// PLAYERS/RESULTS arrays and buildStandings(). A player only appears here once
+// you've added a row for them in the `players` table (Supabase → Table Editor);
+// a result only counts once you've added a row in `results` for a finished
+// tournament. Nothing is fabricated: no players table rows → an honest empty
+// state, exactly like the events loader.
+async function loadPlayersFromSupabase(){
+  try{
+    if(typeof supabase === 'undefined') throw new Error('Supabase SDK unavailable');
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    const { data: players, error: pErr } = await sb.from('players').select('*');
+    if(pErr) throw pErr;
+
+    // Pull each result together with the tournament it belongs to (for the
+    // event title + date shown in "recent results"), oldest first so the
+    // slice(-8) form strip below reads left-to-right as "oldest → newest".
+    const { data: results, error: rErr } = await sb
+      .from('results')
+      .select('player_id, position, tournaments(name, tournament_date)')
+      .order('created_at', { ascending: true });
+    if(rErr) throw rErr;
+
+    PLAYERS = (players||[]).map(p => ({
+      id: p.id,
+      name: p.name || 'Unnamed player',
+      // Initials for the avatar badge, computed from the name instead of
+      // being hand-typed per player: "Jordan Ward" → "JW".
+      initials: (p.name||'').trim().split(/\s+/).map(w=>w[0]).join('').slice(0,2).toUpperCase() || '?',
+      region: p.region || '',
+      rating: p.rating ?? null,
+      avg: p.avg ?? null,
+      checkout: p.checkout_pct ?? null,
+      e180: p.e180 ?? 0,
+      hi: p.hi_checkout ?? null,
+      bestLeg: p.best_leg ?? null,
+      // Filled in below from `results` — matches the old computed fields.
+      points: 0, wins: 0, events: 0, recent: [], form: []
+    }));
+    const byId = Object.fromEntries(PLAYERS.map(p=>[p.id,p]));
+
+    (results||[]).forEach(r=>{
+      const p = byId[r.player_id]; if(!p) return;             // result for a player row that doesn't exist (yet) — skip
+      const t = r.tournaments || {};
+      const iso = t.tournament_date ? String(t.tournament_date).slice(0,10) : '';
+      const dt = parseLocalDate(iso);
+      const date = dt ? dt.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '';
+      p.points += placePts(r.position);
+      p.events += 1;
+      if(r.position===1) p.wins += 1;
+      p.recent.push({ title: t.name || 'Tournament', date, pos: r.position, pts: placePts(r.position) });
+    });
+    PLAYERS.forEach(p=>{ p.form = p.recent.slice(-8).map(r=>r.pos<=2?'W':'L'); });
+
+    // Ranked list: players who've actually played at least one real event.
+    REG = PLAYERS.filter(p=>p.events>0).sort((a,b)=> b.points-a.points || b.wins-a.wins);
+    REG.forEach((p,i)=>p.rank=i+1);
+
+    // Winners feed: every result where position === 1, most recent first.
+    WINNERS = (results||[])
+      .filter(r=>r.position===1)
+      .map(r=>{
+        const p=byId[r.player_id];
+        const t=r.tournaments||{};
+        const iso = t.tournament_date ? String(t.tournament_date).slice(0,10) : '';
+        const dt = parseLocalDate(iso);
+        const date = dt ? dt.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '';
+        return { title: t.name||'Tournament', region: p?p.region:'', date, name: p?p.name:'—', id: p?p.id:'' };
+      })
+      .reverse(); // most recently added first
+  }catch(err){
+    console.error('Could not load players/results:', err);
+    PLAYERS = []; REG = []; WINNERS = [];   // no stale or placeholder data is kept
+  }finally{
+    playersLoaded = true;
+    renderRankings(); renderPlayers();
+    // If a visitor deep-linked straight to a player profile before this
+    // resolved, re-render it now that real data (or the empty state) is ready.
+    if($('#route-player')?.classList.contains('active')){
+      renderPlayerProfile(location.hash.split(':')[1]);
+    }
+  }
 }
-buildStandings();
-
-// Registered players who have played, ranked by points (rank 1 at the top).
-const REG = PLAYERS.filter(p=>p.registered && p.events>0).sort((a,b)=> b.points-a.points || b.wins-a.wins);
-REG.forEach((p,i)=>p.rank=i+1);
-
-// Recent event winners for the results feed (most recent first).
-const WINNERS = RESULTS.filter(ev=>ev.p.some(x=>x[1]===1)).map(ev=>{
-  const w=ev.p.find(x=>x[1]===1); const p=PLAYERS.find(x=>x.id===w[0]);
-  return {title:ev.t, region:ev.r, date:ev.d, name:p?p.name:'—', id:p?p.id:''};
-});
 
 const INCLUDES = [
   'Verified player profile across all 12 UK regions',
@@ -1195,46 +1190,65 @@ function renderEventDetail(id){
 }
 
 function renderRankings(){
-  $('#rank-body').innerHTML = REG.map(p=>`
-    <tr class="clk" data-link="player:${p.id}">
-      <td class="rank ${p.rank===1?'top':''}">${p.rank}</td>
-      <td><strong>${p.name}</strong></td>
-      <td style="color:var(--muted-2)">${p.region}</td>
-      <td class="num pts">${p.points}</td>
-      <td class="num" style="color:var(--muted-2)">${p.wins}</td>
-      <td class="num" style="color:var(--muted-2)">${p.events}</td>
-    </tr>`).join('');
+  const body=$('#rank-body');
+  if(body){
+    if(!playersLoaded){
+      body.innerHTML = `<tr><td colspan="6">${stateMsg('Loading rankings…')}</td></tr>`;
+    }else if(!REG.length){
+      body.innerHTML = `<tr><td colspan="6">${stateMsg('No ranked players yet — results will appear here once the first events are logged.')}</td></tr>`;
+    }else{
+      body.innerHTML = REG.map(p=>`
+        <tr class="clk" data-link="player:${p.id}">
+          <td class="rank ${p.rank===1?'top':''}">${p.rank}</td>
+          <td><strong>${p.name}</strong></td>
+          <td style="color:var(--muted-2)">${p.region}</td>
+          <td class="num pts">${p.points}</td>
+          <td class="num" style="color:var(--muted-2)">${p.wins}</td>
+          <td class="num" style="color:var(--muted-2)">${p.events}</td>
+        </tr>`).join('');
+    }
+  }
   const feed=$('#results-feed');
   if(feed){
-    feed.innerHTML = WINNERS.filter(w=>w.date==='12 Jun').map(w=>`
-      <div class="reg-row" ${w.id?`data-link="player:${w.id}" style="cursor:pointer"`:''}>
-        <span class="dot live"></span>
-        <span>${w.region}<br><span class="mono" style="color:var(--muted);font-size:11px">${w.name} · winner</span></span>
-      </div>`).join('');
+    if(!playersLoaded){
+      feed.innerHTML = stateMsg('Loading…');
+    }else if(!WINNERS.length){
+      feed.innerHTML = stateMsg('No results logged yet.');
+    }else{
+      feed.innerHTML = WINNERS.slice(0,8).map(w=>`
+        <div class="reg-row" ${w.id?`data-link="player:${w.id}" style="cursor:pointer"`:''}>
+          <span class="dot live"></span>
+          <span>${w.region}<br><span class="mono" style="color:var(--muted);font-size:11px">${w.name} · winner</span></span>
+        </div>`).join('');
+    }
   }
 }
 
 function playerCard(p){
   return `<article class="card clk player-card" data-link="player:${p.id}">
     <div class="top">
-      <div class="ava ${p.ava}">${p.initials}</div>
+      <div class="ava">${p.initials}</div>
       <div><h3 style="font-size:19px">${p.name}</h3>
         <div class="mono" style="font-size:12.5px;color:var(--muted-2)">${p.region} · #${p.rank}</div></div>
     </div>
     <div class="pc-stats">
       <div class="b"><div class="v">${p.points}</div><div class="l">Points</div></div>
       <div class="b"><div class="v">${p.wins}</div><div class="l">Wins</div></div>
-      <div class="b"><div class="v">${p.avg}</div><div class="l">3-dart avg</div></div>
+      <div class="b"><div class="v">${p.avg ?? '—'}</div><div class="l">3-dart avg</div></div>
     </div>
   </article>`;
 }
 
-// Players show once registered + played. Search finds ALL by name or region;
-// otherwise the page shows the top 6 (overall, or within the chosen region).
 function renderPlayers(){
+  const grid=$('#player-grid'), head=$('#players-note');
+  if(!grid) return;
+  if(!playersLoaded){
+    grid.innerHTML=''; if(head) head.textContent='Loading…';
+    return;
+  }
   const q=($('#p-search')?.value||'').toLowerCase().trim();
   const region=$('#p-region')?.value||'All regions';
-  let list=REG; // already registered + ranked
+  let list=REG; // already ranked, played at least one real event
   let note='';
   if(q){
     list=REG.filter(p=>p.name.toLowerCase().includes(q)||p.region.toLowerCase().includes(q));
@@ -1244,10 +1258,10 @@ function renderPlayers(){
     note='Top '+list.length+' · '+region;
   }else{
     list=REG.slice(0,6);
-    note='Top 6 across the UK';
+    note = REG.length ? 'Top 6 across the UK' : '';
   }
-  const head=$('#players-note'); if(head) head.textContent=note;
-  $('#player-grid').innerHTML = list.map(playerCard).join('') || '<p style="color:var(--muted)">No registered players match that search.</p>';
+  if(head) head.textContent=note;
+  grid.innerHTML = list.map(playerCard).join('') || '<p style="color:var(--muted)">No ranked players yet — check back once results start coming in.</p>';
 }
 
 function sparkline(form){
@@ -1261,51 +1275,53 @@ function sparkline(form){
 }
 
 function renderPlayerProfile(id){
-  const p=PLAYERS.find(x=>x.id===id)||PLAYERS[0];
-  $('#player-profile').innerHTML=`
+  const el=$('#player-profile'); if(!el) return;
+  if(!playersLoaded){ el.innerHTML = stateMsg('Loading player…'); return; }
+  const p=PLAYERS.find(x=>String(x.id)===String(id));
+  if(!p){ el.innerHTML = stateMsg('That player profile isn’t available.'); return; }
+  el.innerHTML=`
     <div class="profile-hero">
-      <div class="ava lg ${p.ava}">${p.initials}</div>
+      <div class="ava lg">${p.initials}</div>
       <div class="meta">
-        <span class="eyebrow">Rank #${p.rank} · ${p.region}</span>
+        <span class="eyebrow">${p.rank?('Rank #'+p.rank+' · '):''}${p.region}</span>
         <h2>${p.name}</h2>
         <div class="badges">
           <span class="pill green">${p.points} ranking pts</span>
           <span class="pill">${p.events} events</span>
-          <span class="pill fmt">Rating ${p.rating}</span>
+          ${p.rating!=null?`<span class="pill fmt">Rating ${p.rating}</span>`:''}
         </div>
       </div>
     </div>
     <div class="bigstats">
-      <div class="b"><div class="v">${p.avg}</div><div class="l">3-dart average</div></div>
-      <div class="b"><div class="v">${p.checkout}%</div><div class="l">Checkout %</div></div>
+      <div class="b"><div class="v">${p.avg ?? '—'}</div><div class="l">3-dart average</div></div>
+      <div class="b"><div class="v">${p.checkout!=null?p.checkout+'%':'—'}</div><div class="l">Checkout %</div></div>
       <div class="b"><div class="v">${p.e180}</div><div class="l">180s this season</div></div>
-      <div class="b"><div class="v">${p.hi}</div><div class="l">Highest checkout</div></div>
+      <div class="b"><div class="v">${p.hi ?? '—'}</div><div class="l">Highest checkout</div></div>
     </div>
     <div class="detail-grid" style="margin-top:24px">
       <div class="panel">
         <h3 style="font-size:19px">Recent results</h3>
         <div class="tbl-wrap" style="margin-top:14px;border:none">
-          <table>
+          ${p.recent.length ? `<table>
             <thead><tr><th>Event</th><th>Date</th><th>Finish</th><th class="num">Pts</th></tr></thead>
             <tbody>
-              ${p.recent.slice(0,6).map(r=>`<tr><td><strong>${r.title}</strong></td><td style="color:var(--muted-2)">${r.date}</td>
+              ${p.recent.slice(-6).reverse().map(r=>`<tr><td><strong>${r.title}</strong></td><td style="color:var(--muted-2)">${r.date}</td>
                 <td>${finishLabel(r.pos)}</td><td class="num pts">+${r.pts}</td></tr>`).join('')}
             </tbody>
-          </table>
+          </table>` : stateMsg('No results logged for this player yet.')}
         </div>
       </div>
       <div>
         <div class="panel">
           <h3 style="font-size:18px">Recent form</h3>
-          <div class="form-strip">${p.form.slice(-8).map(f=>`<div class="f ${f.toLowerCase()}">${f}</div>`).join('')}</div>
-          ${sparkline(p.form)}
+          ${p.form.length ? `<div class="form-strip">${p.form.slice(-8).map(f=>`<div class="f ${f.toLowerCase()}">${f}</div>`).join('')}</div>${sparkline(p.form)}` : stateMsg('No form yet.')}
         </div>
         <div class="panel">
           <h3 style="font-size:18px;margin-bottom:8px">Career stats</h3>
           <div class="stat-line"><span class="mono" style="color:var(--muted)">Wins</span><span>${p.wins}</span></div>
-          <div class="stat-line"><span class="mono" style="color:var(--muted)">Best leg</span><span>${p.bestLeg} darts</span></div>
+          <div class="stat-line"><span class="mono" style="color:var(--muted)">Best leg</span><span>${p.bestLeg!=null?p.bestLeg+' darts':'—'}</span></div>
           <div class="stat-line"><span class="mono" style="color:var(--muted)">180s</span><span>${p.e180}</span></div>
-          <div class="stat-line"><span class="mono" style="color:var(--muted)">Checkout %</span><span>${p.checkout}%</span></div>
+          <div class="stat-line"><span class="mono" style="color:var(--muted)">Checkout %</span><span>${p.checkout!=null?p.checkout+'%':'—'}</span></div>
         </div>
       </div>
     </div>`;
@@ -1451,16 +1467,9 @@ $('#join-form').addEventListener('submit',async e=>{
 });
 
 /* init */
-function fillRegions(){
-  // Only the players filter is seeded here (interim — see REGIONS note). The
-  // events filter (#f-region) and join form (#jf-region) are filled from the
-  // live enum in loadRegionsFromEnum(), so there's no hard-coded region data
-  // behind them.
-  const pl=$('#p-region');
-  REGIONS.forEach(r=>{
-    if(pl) pl.insertAdjacentHTML('beforeend','<option>'+r+'</option>');
-  });
-}
+// (Players region filter used to be seeded from a hard-coded list here. Now
+// that players live in the database, it's filled from the live uk_regions
+// enum by loadRegionsFromEnum() below, same as the other region selectors.)
 
 // Pull the region options straight from the Postgres `uk_regions` enum so the
 // selector is always in step with the type — no list to maintain by hand. The
@@ -1504,6 +1513,16 @@ async function loadRegionsFromEnum(){
     regions.forEach(r=> jf.add(new Option(r)));
     jf.add(new Option('Other / not listed'));
     if([...jf.options].some(o=>o.value===cur)) jf.value=cur;
+  }
+  // Players filter: "All regions" first, then every enum value — same
+  // vocabulary as everywhere else, no separate hard-coded list.
+  const pf=$('#p-region');
+  if(pf){
+    const cur=pf.value;
+    pf.innerHTML='';
+    pf.add(new Option('All regions'));
+    regions.forEach(r=> pf.add(new Option(r)));
+    if([...pf.options].some(o=>o.value===cur)) pf.value=cur;
   }
 }
 // Build a local Date from a Y-M-D string. Never `new Date("YYYY-MM-DD")` — a
@@ -1581,10 +1600,10 @@ EVENTS = (data||[]).map(t => {
   renderHome(); renderHeroSide(); renderEvents(); buildTicker();
  }
 }
-fillRegions();
 renderHome(); renderHeroSide(); renderEvents(); buildTicker();   // loading state until the load resolves
-renderRankings(); renderPlayers(); renderMembership();
+renderRankings(); renderPlayers(); renderMembership();            // loading state until loadPlayersFromSupabase resolves
 loadTournamentsFromSupabase();
+loadPlayersFromSupabase();
 loadRegionsFromEnum();
 go((location.hash||'#home').slice(1)||'home');
 
