@@ -847,14 +847,16 @@
    ---------------------------------------------------------------------
    FORM_ENDPOINT  : Formspree form — submissions go to your inbox.
    CHECKOUT_URL   : Stripe Payment Link for the £12 annual membership.
-   TOURNAMENT_URL : Stripe Payment Link for the £6 event buy-in.
-   To change any of them, just paste a new URL below.
+   The £6 tournament buy-in no longer uses a fixed Payment Link — a
+   Supabase Edge Function (create-tournament-checkout) builds a fresh
+   Stripe Checkout Session for each entry instead.
+   To change CHECKOUT_URL, just paste a new URL below.
    (If FORM_ENDPOINT is ever blanked, the form falls back to demo mode.)
    ===================================================================== */
 const FORM_ENDPOINT = "https://formspree.io/f/mykababr";                          // Tournza Formspree form
 const WEB3FORMS_KEY = "";                                                          // not used
 const CHECKOUT_URL  = "https://buy.stripe.com/eVq28kgwG0MpaIsf6M1ck01";            // £12 membership
-const TOURNAMENT_URL= "https://buy.stripe.com/bJe6oAa8ieDf4k40bS1ck03";            // £6 event buy-in
+// (The £6 buy-in no longer uses a fixed link — see create-tournament-checkout.)
 
 /* Supabase (auth / session) — same project as login.html */
 const SUPABASE_URL = "https://uwojmyggmacoxrdolstb.supabase.co";
@@ -884,15 +886,8 @@ function withRef(url, userId){
   return url + sep + 'client_reference_id=' + encodeURIComponent(userId);
 }
 
-/* Same idea as withRef, but for the tournament buy-in: one Payment Link is
-   shared by every event, so client_reference_id has to carry BOTH which
-   account is paying AND which tournament they're entering. Packed as
-   "userId:tournamentId" and split apart again in the webhook. */
-function withTournamentRef(url, userId, tournamentId){
-  if(!url || !userId || !tournamentId) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'client_reference_id=' + encodeURIComponent(userId + ':' + tournamentId);
-}
+/* Same idea, but for tournament entry the reference is now set server-side
+   when create-tournament-checkout builds the session — see that function. */
 
 /* ---------------- data ---------------- */
 // REGIONS used to be a hard-coded list backing only the players filter.
@@ -1385,18 +1380,25 @@ document.addEventListener('click',e=>{
       go('membership');
       return;
     }
-    if(TOURNAMENT_URL){
-      // Stripe's redirect back to us is one fixed URL (Payment Links can't
-      // carry a different address per click), so it can't tell us which
-      // tournament this was for. We save that ourselves, in this browser tab,
-      // right before leaving — sessionStorage survives the trip to Stripe and
-      // back as long as it's the same tab.
-      try{ sessionStorage.setItem('tournza_pending_entry', JSON.stringify({ tournamentId: t.dataset.tournament, ts: Date.now() })); }catch(_){}
-      const dest = withTournamentRef(TOURNAMENT_URL, authState.user && authState.user.id, t.dataset.tournament);
-      console.log('[debug] buy-in redirect →', dest, '| user id:', authState.user && authState.user.id, '| tournament id:', t.dataset.tournament); // TEMPORARY — remove once confirmed working
-      window.location.href = dest;
-    }
-    else { go('membership'); }
+    // Ask our own server code to create a fresh, one-time Stripe checkout for
+    // THIS tournament and THIS user, then send the browser there. This is
+    // more reliable than a shared link with a URL parameter tacked on — the
+    // reference is set directly, server-to-server, when the session is made.
+    (async()=>{
+      t.disabled = true; const label = t.textContent; t.textContent = 'Starting checkout…';
+      try{
+        const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        const { data, error } = await sb.functions.invoke('create-tournament-checkout', {
+          body: { tournamentId: t.dataset.tournament }
+        });
+        if(error || !data || !data.url) throw error || new Error('No checkout URL returned');
+        window.location.href = data.url;
+      }catch(err){
+        console.error('Could not start checkout:', err);
+        notify('Could not start checkout — please try again in a moment.','warn');
+        t.disabled = false; t.textContent = label;
+      }
+    })();
     return;
   }
   // membership checkout (Stripe) — requires sign-in so the purchase ties to an account
@@ -1710,6 +1712,7 @@ go((location.hash||'#home').slice(1)||'home');
     try{
       const url = new URL(location.href);
       url.searchParams.delete('tournament');
+      url.searchParams.delete('event');
       history.replaceState(null,'', url.pathname + (url.search||'') + (location.hash||''));
     }catch(_){}
   }
@@ -1739,25 +1742,21 @@ go((location.hash||'#home').slice(1)||'home');
       return;
     }
 
-    // Did we just return from Stripe tournament buy-in checkout?
-    if(params.get('tournament')==='success'){
+    // Did we just return from Stripe tournament buy-in checkout? The session
+    // we created ourselves (create-tournament-checkout) sends the tournament
+    // id straight back in the success URL, so no sessionStorage juggling needed.
+    const tournamentId = params.get('event');
+    if(params.get('tournament')==='success' && tournamentId){
       cleanTournamentParam();
-      let pending = null;
-      try{ pending = JSON.parse(sessionStorage.getItem('tournza_pending_entry')||'null'); }catch(_){}
       applyMembership(await loadMembership(user));
-      if(!pending || !pending.tournamentId){
-        notify('Payment received — check the event page shortly for your entry.');
-        return;
-      }
       notify('Confirming your entry…');
       // Same webhook, same short wait — it writes the tournament_entries row.
-      let entered = await checkTournamentEntry(user, pending.tournamentId);
-      for(let i=0; i<6 && !entered; i++){ await sleep(1500); entered = await checkTournamentEntry(user, pending.tournamentId); }
-      try{ sessionStorage.removeItem('tournza_pending_entry'); }catch(_){}
+      let entered = await checkTournamentEntry(user, tournamentId);
+      for(let i=0; i<6 && !entered; i++){ await sleep(1500); entered = await checkTournamentEntry(user, tournamentId); }
       notify(entered
         ? 'You’re entered ✓'
         : 'Payment received — your entry will show shortly. Refresh in a moment if it doesn’t.');
-      go('event:' + pending.tournamentId);
+      go('event:' + tournamentId);
       return;
     }
 
