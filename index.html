@@ -641,7 +641,8 @@
         <div class="stat-line"><span class="mono" style="color:var(--muted)">Plan</span><span>Tournza Standard</span></div>
         <div class="stat-line"><span class="mono" style="color:var(--muted)">Price</span><span>£12 / year</span></div>
         <div class="stat-line"><span class="mono" style="color:var(--muted)">Member since</span><span id="acct-member-since">—</span></div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:16px;width:100%" data-link="membership">Manage plan</button>
+        <div class="stat-line" id="acct-renewal-line" hidden><span class="mono" style="color:var(--muted)" id="acct-renewal-label">Renews</span><span id="acct-renewal-date">—</span></div>
+        <button class="btn btn-ghost btn-sm" id="acct-manage-plan" style="margin-top:16px;width:100%" data-link="membership">Manage plan</button>
       </div>
       <div class="panel">
         <span class="pill">Eligibility</span>
@@ -843,17 +844,15 @@
    LAUNCH CONFIG  —  these are live for Tournza
    ---------------------------------------------------------------------
    FORM_ENDPOINT  : Formspree form — submissions go to your inbox.
-   CHECKOUT_URL   : Stripe Payment Link for the £12 annual membership.
-   The £6 tournament buy-in no longer uses a fixed Payment Link — a
-   Supabase Edge Function (create-tournament-checkout) builds a fresh
-   Stripe Checkout Session for each entry instead.
-   To change CHECKOUT_URL, just paste a new URL below.
+   Membership (annual, auto-renewing) and the £6 tournament buy-in both
+   build a fresh Stripe Checkout Session on the fly (create-membership-
+   checkout / create-tournament-checkout) rather than using a fixed
+   Payment Link — real subscriptions and reliable per-tournament
+   attribution both need that, not a static URL.
    (If FORM_ENDPOINT is ever blanked, the form falls back to demo mode.)
    ===================================================================== */
 const FORM_ENDPOINT = "https://formspree.io/f/mykababr";                          // Tournza Formspree form
 const WEB3FORMS_KEY = "";                                                          // not used
-const CHECKOUT_URL  = "https://buy.stripe.com/eVq28kgwG0MpaIsf6M1ck01";            // £12 membership
-// (The £6 buy-in no longer uses a fixed link — see create-tournament-checkout.)
 
 /* Supabase (auth / session) — same project as login.html */
 const SUPABASE_URL = "https://uwojmyggmacoxrdolstb.supabase.co";
@@ -875,16 +874,8 @@ function notify(msg, kind){
   __toastTimer = setTimeout(()=>el.classList.remove('show'), 4200);
 }
 
-/* Append the Supabase user id as Stripe's client_reference_id so the webhook
-   can attribute the payment to the right account. */
-function withRef(url, userId){
-  if(!url || !userId) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'client_reference_id=' + encodeURIComponent(userId);
-}
-
-/* Same idea, but for tournament entry the reference is now set server-side
-   when create-tournament-checkout builds the session — see that function. */
+/* Membership and tournament entry references are now set server-side when
+   their respective create-*-checkout functions build the session. */
 
 /* ---------------- data ---------------- */
 // REGIONS used to be a hard-coded list backing only the players filter.
@@ -1407,7 +1398,19 @@ document.addEventListener('click',e=>{
       return;
     }
     if(authState.membershipActive){ notify('Your membership is already active ✓'); return; }
-    if(CHECKOUT_URL){ window.location.href = withRef(CHECKOUT_URL, authState.user && authState.user.id); }
+    (async()=>{
+      t.disabled = true; const label = t.textContent; t.textContent = 'Starting checkout…';
+      try{
+        const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        const { data, error } = await sb.functions.invoke('create-membership-checkout', { body: {} });
+        if(error || !data || !data.url) throw error || new Error('No checkout URL returned');
+        window.location.href = data.url;
+      }catch(err){
+        console.error('Could not start checkout:', err);
+        notify('Could not start checkout — please try again in a moment.','warn');
+        t.disabled = false; t.textContent = label;
+      }
+    })();
     return;
   }
   // carry an event into the join form (fallback path)
@@ -1778,7 +1781,7 @@ go((location.hash||'#home').slice(1)||'home');
     try{
       const [{ data: profile }, { data: entries }] = await Promise.all([
         sb.from('profiles')
-          .select('full_name, membership_status, created_at, age_verified, cam_verified')
+          .select('full_name, membership_status, created_at, age_verified, cam_verified, stripe_customer_id, current_period_end, cancel_at_period_end')
           .eq('id', user.id).maybeSingle(),
         sb.from('tournament_entries')
           .select('id, tournaments(id, name, tournament_date)')
@@ -1804,6 +1807,40 @@ go((location.hash||'#home').slice(1)||'home');
     if(since) since.textContent = profile.created_at
       ? (parseLocalDate(String(profile.created_at).slice(0,10))||new Date(profile.created_at)).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})
       : '—';
+
+    const renewalLine = $('#acct-renewal-line'), renewalLabel = $('#acct-renewal-label'), renewalDate = $('#acct-renewal-date');
+    if(renewalLine){
+      if(profile.current_period_end){
+        const d = new Date(profile.current_period_end).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+        renewalLine.hidden = false;
+        if(renewalLabel) renewalLabel.textContent = profile.cancel_at_period_end ? 'Membership ends' : 'Renews';
+        if(renewalDate) renewalDate.textContent = d;
+      } else {
+        renewalLine.hidden = true; // no subscription on file yet (e.g. still on the old one-off payment)
+      }
+    }
+
+    const manageBtn = $('#acct-manage-plan');
+    if(manageBtn){
+      if(profile.stripe_customer_id){
+        manageBtn.removeAttribute('data-link');
+        manageBtn.onclick = async ()=>{
+          const label = manageBtn.textContent; manageBtn.disabled = true; manageBtn.textContent = 'Opening…';
+          try{
+            const { data, error } = await sb.functions.invoke('create-portal-session', { body: {} });
+            if(error || !data || !data.url) throw error || new Error('No portal URL returned');
+            window.location.href = data.url;
+          }catch(err){
+            console.error('Could not open billing portal:', err);
+            notify('Could not open billing management — please try again in a moment.','warn');
+            manageBtn.disabled = false; manageBtn.textContent = label;
+          }
+        };
+      } else {
+        manageBtn.dataset.link = 'membership'; // no subscription yet — send them to join instead
+        manageBtn.onclick = null;
+      }
+    }
 
     const ageEl = $('#acct-age-check'), camEl = $('#acct-cam-check');
     if(ageEl) ageEl.outerHTML = profile.age_verified
